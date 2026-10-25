@@ -12,6 +12,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use chrono::{NaiveDate, NaiveDateTime};
+use dhrust::json::write_quoted;
 
 /// 字段值类型（内存数据库中的“万能值”）。
 #[derive(Clone, Debug)]
@@ -191,20 +192,6 @@ fn format_float(v: f64) -> String {
     } else {
         format!("{v}")
     }
-}
-
-/// 写 JSON 字符串（C# `JsonString.ClearNewLine` 兼容：去换行/Tab，转义反斜杠与引号）。
-pub(crate) fn write_quoted(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\r' | '\n' | '\t' => {}
-            c => out.push(c),
-        }
-    }
-    out.push('"');
 }
 
 /// 时间文本解析（先走 `dhrust::times::parse_datetime`，再补 C# `Convert.ToDateTime` 常见格式）。

@@ -62,7 +62,7 @@
 |---|---|---|
 | 文件 | `{BaseDirectory}/Data/{FullName}.json` | `{base_dir}/Data/{type_name}.json` |
 | 格式 | `SimpleJsonString`：`[\r\n\t{ Id:1, Name:"x", A:1 }\r\n]` | 相同（裸键、`\r\n` + `\t`、`Id`/`Name` 在前、字段按 `fields()` 顺序） |
-| 解析 | 自带 `JsonParser`（注释/裸键） | 自带宽松解析器（注释/裸键/引号键/尾逗号/Unicode） |
+| 解析 | 自带 `JsonParser`（注释/裸键） | 复用 `dhrust::json::parse_lax`（注释/裸键/引号键/尾逗号/Unicode；C# 兼容下沉实现） |
 | 写入 | `Task.Run` 异步 + 500ms 跳过 | 后台线程 + 500ms 合并（**不丢尾写**）+ 原子替换 |
 | 转义 | `JsonString.ClearNewLine`（`\`/`"`、去换行/Tab） | 相同（`Name` 也转义，C# 特殊路径未转义） |
 | 时间 | `DateTime.ToString()`（随文化，如 `2024/1/5 14:30:00`） | 写 `yyyy-MM-dd HH:mm:ss`；读兼容斜杠/ISO/Unix 时间戳 |
