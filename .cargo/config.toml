@@ -1,0 +1,9 @@
+# 国内镜像：crates.io 透明替换为 rsproxy（Cargo.lock 的源地址不变，不产生锁拖动）
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true

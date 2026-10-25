@@ -1,0 +1,26 @@
+[package]
+name = "pek-rmdb"
+version = "0.1.0"
+edition = "2024"
+description = "Pek.RMDB：高性能内存数据库（C# Pek.MDB 的 Rust 实现）"
+license = "MIT"
+repository = "https://github.com/RemoteAll/Pek.RMDB"
+keywords = ["memory-database", "cache", "orm", "json"]
+categories = ["database"]
+readme = "README.md"
+
+[dependencies]
+# 时间解析/格式化（与 dhrust::times 同口径，复用 C# 兼容的多格式解析）
+chrono = { version = "0.4", features = ["clock"] }
+# 复用生态公共能力：times（C# 兼容时间解析）/ io（原子替换文件）
+dhrust = { path = "../DH.RustBase" }
+
+[dev-dependencies]
+tempfile = "3"
+
+# 日常构建用 --profile fast（release 语义、关闭 fat LTO），发版才用 --release
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

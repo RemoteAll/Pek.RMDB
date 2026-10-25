@@ -1,0 +1,5 @@
+/target
+/Data
+**/*.rs.bk
+*.zip
+*.tar.gz
