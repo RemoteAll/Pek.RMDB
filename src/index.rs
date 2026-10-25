@@ -13,11 +13,12 @@
 //! - 字符串前缀查询走 `BTreeMap` 有序范围，包含/后缀/复杂通配才遍历键；
 //! - 索引计数用 `AtomicU64`，读路径无锁（外层表读锁为读写锁，多读并发）。
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::hash::{new_map, FastMap};
 use crate::model::{Field, IndexStatistics};
-use crate::value::{FieldKind, FieldValue, TimePattern};
+use crate::value::{FieldKind, FieldValue};
 
 /// 单个字段的索引槽。
 pub(crate) struct IndexSlot {
@@ -74,10 +75,11 @@ impl IndexSlot {
     fn pattern(&self, pattern: &str) -> Vec<i64> {
         self.query_count.fetch_add(1, Ordering::Relaxed);
         let ids = match self.kind {
-            // 时间字段：年 / 年月 / 年月日（对齐 C# DateTimeIndex.GetByPattern）
-            FieldKind::Time => match TimePattern::parse(pattern).and_then(|p| p.range()) {
+            // 时间字段：年 / 年月 / 年月日（复用 dhrust::times 的闭区间）
+            FieldKind::Time => match dhrust::times::date_range_of(pattern) {
                 Some((start, end)) => {
-                    self.index.range(&FieldValue::Time(start), &FieldValue::Time(end))
+                    self.index
+                        .range(&FieldValue::Time(start), &FieldValue::Time(end))
                 }
                 None => Vec::new(),
             },
@@ -110,11 +112,11 @@ enum TypedIndex {
     /// 文本：精确 + 大小写不敏感有序索引。
     Text(TextIndex),
     /// 复杂值：按 JSON 文本精确索引。
-    Exact(HashMap<FieldValue, BTreeSet<i64>>),
+    Exact(FastMap<FieldValue, BTreeSet<i64>>),
 }
 
 struct TextIndex {
-    exact: HashMap<String, BTreeSet<i64>>,
+    exact: FastMap<String, BTreeSet<i64>>,
     lower: BTreeMap<String, BTreeSet<i64>>,
 }
 
@@ -126,10 +128,10 @@ impl TypedIndex {
                 TypedIndex::Ordered(BTreeMap::new())
             }
             FieldKind::Text => TypedIndex::Text(TextIndex {
-                exact: HashMap::new(),
+                exact: new_map(),
                 lower: BTreeMap::new(),
             }),
-            FieldKind::Json => TypedIndex::Exact(HashMap::new()),
+            FieldKind::Json => TypedIndex::Exact(new_map()),
         }
     }
 
@@ -297,7 +299,7 @@ fn remove_from_map(
 }
 
 fn remove_from_hash_map(
-    map: &mut HashMap<FieldValue, BTreeSet<i64>>,
+    map: &mut FastMap<FieldValue, BTreeSet<i64>>,
     key: &FieldValue,
     id: i64,
 ) -> bool {
@@ -311,7 +313,7 @@ fn remove_from_hash_map(
     removed
 }
 
-fn remove_from_string_map(map: &mut HashMap<String, BTreeSet<i64>>, key: &str, id: i64) -> bool {
+fn remove_from_string_map(map: &mut FastMap<String, BTreeSet<i64>>, key: &str, id: i64) -> bool {
     let Some(ids) = map.get_mut(key) else {
         return false;
     };
@@ -408,13 +410,13 @@ fn text_pattern(index: &TextIndex, pattern: &str) -> Vec<i64> {
 /// 字段索引集合。
 #[derive(Default)]
 pub(crate) struct IndexSet {
-    slots: HashMap<&'static str, IndexSlot>,
+    slots: FastMap<&'static str, IndexSlot>,
 }
 
 impl IndexSet {
     pub(crate) fn new() -> Self {
         Self {
-            slots: HashMap::new(),
+            slots: new_map(),
         }
     }
 

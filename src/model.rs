@@ -210,27 +210,8 @@ pub trait CacheObject: Clone + Default + Send + Sync + 'static {
     }
 }
 
-/// 分页结果（对应 C# `PagedResult<T>`）。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PagedResult<T> {
-    /// 当前页数据。
-    pub items: Vec<T>,
-    /// 页索引（从 0 开始）。
-    pub page_index: usize,
-    /// 页大小。
-    pub page_size: usize,
-    /// 总记录数。
-    pub total_count: usize,
-    /// 总页数。
-    pub total_pages: usize,
-}
-
-impl<T> PagedResult<T> {
-    /// 是否为空页。
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-}
+/// 分页结果（复用 `dhrust::web::Paged`，字段口径与 C# `PagedResult<T>` 一致）。
+pub use dhrust::web::Paged as PagedResult;
 
 /// 单个索引的统计信息（对应 C# `IndexStatistics`）。
 #[derive(Clone, Debug, PartialEq)]

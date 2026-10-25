@@ -48,7 +48,7 @@
 |---|---|---|
 | `StringIndex` | `TextIndex { exact: HashMap, lower: BTreeMap }` | 精确区分大小写；`find_by_like` 大小写不敏感；前缀用 `BTreeMap::range`；范围按小写字典序 |
 | `NumericIndex` | `Ordered(BTreeMap<FieldValue, BTreeSet<i64>>)` | 范围 `O(log n + k)`（C# 遍历 `O(n)`） |
-| `DateTimeIndex` | 同上 + `TimePattern` | 范围 + 年/年月/年月日（用日期区间 range，C# 用字符串分组字典） |
+| `DateTimeIndex` | 同上 + 日期模式 | 范围 + 年/年月/年月日（日期区间 range，复用 `dhrust::times::date_range_of`；C# 用字符串分组字典） |
 | `BooleanIndex` | `Bool([BTreeSet<i64>; 2])` | 智能值（true/1/yes/on/是、false/0/no/off/否） |
 | `GenericIndex` | `Exact(HashMap<FieldValue, BTreeSet<i64>>)` | JSON 字段按文本精确索引 |
 

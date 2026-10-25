@@ -429,57 +429,6 @@ impl FieldKind {
     }
 }
 
-/// 时间字段的“年/月/日”模式分类（对齐 C# `DateTimeIndex.GetByPattern`）。
-pub(crate) enum TimePattern {
-    Year(i32),
-    YearMonth(i32, u32),
-    YearMonthDay(i32, u32, u32),
-}
-
-impl TimePattern {
-    pub(crate) fn parse(pattern: &str) -> Option<Self> {
-        let p = pattern.trim();
-        if p.len() == 4 && p.chars().all(|c| c.is_ascii_digit()) {
-            return p.parse().ok().map(TimePattern::Year);
-        }
-        let parts: Vec<&str> = p.split('-').collect();
-        match parts.as_slice() {
-            [y, m] if y.len() == 4 && m.len() == 2 => Some(TimePattern::YearMonth(
-                y.parse().ok()?,
-                m.parse().ok()?,
-            )),
-            [y, m, d] if y.len() == 4 && m.len() == 2 && d.len() == 2 => {
-                Some(TimePattern::YearMonthDay(y.parse().ok()?, m.parse().ok()?, d.parse().ok()?))
-            }
-            _ => None,
-        }
-    }
-
-    /// 该模式的闭区间（用于有序索引范围检索）。
-    pub(crate) fn range(&self) -> Option<(NaiveDateTime, NaiveDateTime)> {
-        let (start, end) = match *self {
-            TimePattern::Year(y) => (NaiveDate::from_ymd_opt(y, 1, 1)?, NaiveDate::from_ymd_opt(y, 12, 31)?),
-            TimePattern::YearMonth(y, m) => {
-                let first = NaiveDate::from_ymd_opt(y, m, 1)?;
-                let next = if m == 12 {
-                    NaiveDate::from_ymd_opt(y + 1, 1, 1)?
-                } else {
-                    NaiveDate::from_ymd_opt(y, m + 1, 1)?
-                };
-                (first, next.pred_opt()?)
-            }
-            TimePattern::YearMonthDay(y, m, d) => {
-                let day = NaiveDate::from_ymd_opt(y, m, d)?;
-                (day, day)
-            }
-        };
-        Some((
-            start.and_hms_opt(0, 0, 0)?,
-            end.and_hms_opt(23, 59, 59)?,
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,24 +495,6 @@ mod tests {
             FieldValue::Int(secs).to_time(),
             dhrust::times::from_unix_timestamp(secs)
         );
-    }
-
-    #[test]
-    fn time_pattern_ranges() {
-        let (start, end) = TimePattern::parse("2024").unwrap().range().unwrap();
-        assert_eq!(start.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-01-01 00:00:00");
-        assert_eq!(end.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-12-31 23:59:59");
-
-        let (start, end) = TimePattern::parse("2024-02").unwrap().range().unwrap();
-        assert_eq!(start.format("%Y-%m-%d").to_string(), "2024-02-01");
-        assert_eq!(end.format("%Y-%m-%d").to_string(), "2024-02-29");
-
-        let (start, end) = TimePattern::parse("2024-01-31").unwrap().range().unwrap();
-        assert_eq!(start.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-01-31 00:00:00");
-        assert_eq!(end.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-01-31 23:59:59");
-
-        assert!(TimePattern::parse("2024-1").is_none());
-        assert!(TimePattern::parse("abc").is_none());
     }
 
     #[test]

@@ -80,6 +80,7 @@
 mod db;
 mod error;
 pub mod json;
+mod hash;
 mod index;
 mod model;
 mod persistence;

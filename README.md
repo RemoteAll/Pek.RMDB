@@ -139,20 +139,22 @@ static EMPLOYEE_RULES: &[CompositeUniqueRule] = &[CompositeUniqueRule::new(
 - `flush()` 可随时同步落盘；`MemoryDb` 释放时默认也会 flush（`DbOptions::flush_on_drop`）。
 - 整体类型不落盘：实现 `CacheObject::not_save() -> true`（对应 C# 类级 `[NotSave]`）。
 
-## 性能（Release，Windows / i7 级桌面 CPU，详见 `docs/审计报告.md`）
+## 性能（Release，Windows / i7 级桌面 CPU，详见 `docs/审计报告-第三轮-下沉与性能-2026-10-25.md`）
 
-| 操作 | 实测 | 备注 |
-|---|---|---|
-| 插入 10 万行（11 索引 + 3 唯一） | **6.8~6.9 µs/行**（14.5 万行/秒） | 批量插入摊销 |
-| `find_by_id` | **120~142 ns/次** | 读锁 + 哈希查 + `Arc` 克隆 |
-| `find_by_unique` | **429~436 ns/次** | 含查询字符串构造 |
-| `update` | **3.05~3.23 µs/行** | 按字段 diff，只重建变化索引 |
-| `find_by_page`（索引顺序） | **8~9 µs/次** | 不排序，按页取 |
-| `find_by_page`（无索引字段/无排序） | 19.8 ms / 1.35 ms（10 万行） | 全量键 + 部分选择 |
-| 并发 `find_by_id` 8 线程 | **668~740 万次/秒** | 读读并发无阻塞 |
-| 全量写盘（10 万行） | 126~128 ms / 20.3 MB | 500ms 合并、原子替换 |
+| 操作 | 第二轮 | 第三轮（FxHash） | 备注 |
+|---|---|---|---|
+| 插入 10 万行（11 索引 + 3 唯一） | 6.8~6.9 µs/行 | **6.81 µs/行**（14.7 万行/秒） | 瓶颈在唯一/索引维护 |
+| `find_by_id` | 120~142 ns | **107 ns** | 读锁 + FxHash 查 + `Arc` 克隆 |
+| `find_by_unique` | 429~436 ns | **393 ns** | 含查询字符串构造 |
+| `find_by(Age)`（低基数，均返 3333 行） | 362~369 µs | **163.7 µs** | 33 万次 `by_id` 查找提速 |
+| `find_by_range`（均返 16670 行） | 834~861 µs | **410.3 µs** | 同上 |
+| `update` | 3.05~3.23 µs/行 | **3.07 µs/行** | 按字段 diff，只重建变化索引 |
+| `find_by_page`（索引顺序） | 8~9 µs | **7 µs** | 不排序，按页取 |
+| `find_by_page`（无索引字段 / 无排序） | 19.8 ms / 1.35 ms | 20.3 ms / 1.32 ms | 全量键 + 部分选择（10 万行） |
+| 并发 `find_by_id` 8 线程 | 668~740 万次/秒 | **817 万次/秒** | 读读并发无阻塞 |
+| 全量写盘（10 万行） | 126~128 ms / 20.3 MB | **124.5 ms / 20.3 MB** | 500ms 合并、原子替换 |
 
-C# 版 README 基准（FindById ≈1 µs、Insert ≈10 µs、唯一查找 ≈1 µs）：Rust 版在同等/更多索引下分别约为 **7.5× / 1.4× / 2.3×** 更快。
+C# 版 README 基准（FindById ≈1 µs、Insert ≈10 µs、唯一查找 ≈1 µs）：Rust 版在同等/更多索引下分别约为 **9.3× / 1.5× / 2.5×** 更快。
 
 ## 构建与测试
 
@@ -165,13 +167,16 @@ cargo test --release --test perf_guard -- --ignored --nocapture --test-threads=1
 
 依赖下载走项目内 `.cargo/config.toml`（rsproxy 镜像）；日常构建可用 `cargo build --profile fast`。
 
-公共能力（不重复实现）：`dhrust::json`（宽松解析/转义/数字格式化）、`dhrust::text::parse_bool`、`dhrust::times`（时间解析）、`dhrust::io`（原子写/通配匹配/安全文件名）。
+公共能力（不重复实现）：`dhrust::json`（宽松解析/转义/数字格式化）、`dhrust::text::parse_bool`、`dhrust::times`（时间解析 + 日期模式区间 `date_range_of`）、`dhrust::io`（原子写/通配匹配/`sanitize_file_name`/`exe_dir`）、`dhrust::web::Paged`（分页结构）。
+
+哈希容器：内部使用 FxHash（`src/hash.rs`）而非标准 `SipHash`——键来自可信业务实体、无需抗碰撞 DoS，读路径因此快 5~15%。
 
 ## 设计文档
 
 - `docs/与C#对照.md`：API/特性映射、有意差异与 C# 缺陷修正清单；
 - `docs/审计报告.md`：首轮性能与资源审计；
 - `docs/审计报告-第二轮-下沉与性能-2026-10-25.md`：下沉候选矩阵、update diff 优化（3.5×）与全量审计；
+- `docs/审计报告-第三轮-下沉与性能-2026-10-25.md`：第三轮下沉（4 项）、FxHash 容器优化与全量审计；
 - `docs/决策记录.md`：每轮决策（含用户原话）；
 - `docs/项目接续指南.md` / `docs/用户档案.md` / `docs/项目记忆.md`：跨会话接续。
 

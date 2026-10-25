@@ -8,9 +8,8 @@
 //! - 数据文件加载时若发现冲突，**跳过该对象**（C# 版只记警告但对象仍在表中，
 //!   会造成“对象存在、唯一索引缺失”的不一致）。
 
-use std::collections::HashMap;
-
 use crate::error::{ConstraintType, Result, RmdbError, UniqueViolation};
+use crate::hash::FastMap;
 use crate::model::{CompositeUniqueRule, Field};
 use crate::value::FieldValue;
 
@@ -31,9 +30,9 @@ type CompositeChange = (
 #[derive(Default)]
 pub(crate) struct UniqueSet {
     /// 单字段：字段名 → 值 → 对象 ID。
-    fields: HashMap<&'static str, HashMap<FieldValue, i64>>,
+    fields: FastMap<&'static str, FastMap<FieldValue, i64>>,
     /// 复合：约束组名 → 组合键 → 对象 ID。
-    composites: HashMap<&'static str, HashMap<Vec<FieldValue>, i64>>,
+    composites: FastMap<&'static str, FastMap<Vec<FieldValue>, i64>>,
 }
 
 impl UniqueSet {

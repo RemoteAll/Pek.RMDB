@@ -122,7 +122,7 @@ pub(crate) fn serialize_snapshot<T: CacheObject>(
     items: &[Arc<dyn Any + Send + Sync>],
     pretty: bool,
 ) -> String {
-    let mut out = String::with_capacity(items.len() * 96 + 4);
+    let mut out = String::with_capacity(items.len() * 192 + 64);
     if pretty {
         out.push_str("[\r\n");
     } else {

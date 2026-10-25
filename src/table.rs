@@ -11,13 +11,13 @@
 //! - 写路径只在真正修改时持锁，索引更新在锁内一次完成，避免多处并发结构的不一致窗口。
 
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 
 use crate::error::{Result, RmdbError};
+use crate::hash::{new_map, FastMap, FastSet};
 use crate::index::IndexSet;
 use crate::json;
 use crate::model::{
@@ -55,7 +55,7 @@ pub(crate) struct Table {
 }
 
 struct State {
-    by_id: HashMap<i64, Erased>,
+    by_id: FastMap<i64, Erased>,
     indexes: IndexSet,
     unique: UniqueSet,
     next_id: i64,
@@ -75,7 +75,7 @@ impl Table {
             not_save: T::not_save(),
             ops: ops_of::<T>(),
             state: RwLock::new(State {
-                by_id: HashMap::new(),
+                by_id: new_map(),
                 indexes,
                 unique: UniqueSet::default(),
                 next_id: 1,
@@ -441,7 +441,7 @@ impl Table {
         // 先查候选集最小的条件（减少交集规模）
         let mut ordered: Vec<&(&str, FieldValue)> = conditions.iter().collect();
         ordered.sort_by_key(|(field, _)| state.indexes.id_count(field));
-        let mut result: Option<HashSet<i64>> = None;
+        let mut result: Option<FastSet<i64>> = None;
         for (field, value) in ordered {
             let Some(kind) = self.field_kind(field) else {
                 return Vec::new();
@@ -449,12 +449,12 @@ impl Table {
             let Some(key) = value.clone().normalize(kind) else {
                 return Vec::new();
             };
-            let ids: HashSet<i64> = state.indexes.find(field, &key).into_iter().collect();
+            let ids: FastSet<i64> = state.indexes.find(field, &key).into_iter().collect();
             result = Some(match result {
                 None => ids,
                 Some(previous) => previous.intersection(&ids).copied().collect(),
             });
-            if result.as_ref().is_some_and(HashSet::is_empty) {
+            if result.as_ref().is_some_and(|set| set.is_empty()) {
                 return Vec::new();
             }
         }
@@ -529,7 +529,6 @@ impl Table {
         let take_end = skip.saturating_add(page_size);
         let state = self.read();
         let total_count = state.by_id.len();
-        let total_pages = total_count.div_ceil(page_size);
 
         let mut items: Vec<Arc<T>> = Vec::new();
         let mut used_index = false;
@@ -601,13 +600,7 @@ impl Table {
             }
         }
 
-        PagedResult {
-            items,
-            page_index,
-            page_size,
-            total_count,
-            total_pages,
-        }
+        PagedResult::new(items, page_index, page_size, total_count)
     }
 
     /// 表统计。

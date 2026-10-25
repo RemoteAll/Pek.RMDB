@@ -56,10 +56,7 @@ impl Default for DbOptions {
 
 /// 默认数据根目录：可执行文件所在目录（对齐 C# `AppDomain.BaseDirectory`）。
 pub fn default_base_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
+    dhrust::io::exe_dir()
 }
 
 /// 内存数据库。
@@ -450,19 +447,11 @@ fn spawn_worker(inner: Weak<Inner>, hub: Arc<PersistHub>) -> Option<JoinHandle<(
         .ok()
 }
 
-/// 数据文件路径（类型名中的路径分隔符等非法字符替换为 `_`，防目录穿越）。
+/// 数据文件路径（类型名经 `dhrust::io::sanitize_file_name` 清洗，防目录穿越）。
 pub(crate) fn table_path(base_dir: &Path, type_name: &str) -> PathBuf {
-    let mut safe = String::with_capacity(type_name.len());
-    for ch in type_name.chars() {
-        match ch {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => safe.push('_'),
-            _ => safe.push(ch),
-        }
-    }
-    while safe.contains("..") {
-        safe = safe.replace("..", "__");
-    }
-    base_dir.join("Data").join(format!("{safe}.json"))
+    base_dir
+        .join("Data")
+        .join(format!("{}.json", dhrust::io::sanitize_file_name(type_name)))
 }
 
 // ----------------------------------------------------------------------
