@@ -99,6 +99,30 @@ fn bench_hot_paths() {
         elapsed * 1e3 / 1_000.0
     );
 
+    // 6.1 无索引字段分页（回退：partial select）
+    let start = Instant::now();
+    for page in 0..100 {
+        let result = db.find_by_page::<User>(Some("Remark"), page % 10, 100, true);
+        assert_eq!(result.items.len(), 100);
+    }
+    let elapsed = ms(start);
+    println!(
+        "find_by_page(无索引字段) 100 次：{elapsed:.1} ms（{:.0} μs/次）",
+        elapsed * 1e3 / 100.0
+    );
+
+    // 6.2 无排序字段分页（按 ID）
+    let start = Instant::now();
+    for page in 0..1_000 {
+        let result = db.find_by_page::<User>(None, page % 100, 50, true);
+        assert_eq!(result.items.len(), 50);
+    }
+    let elapsed = ms(start);
+    println!(
+        "find_by_page(无排序字段) 1 千次：{elapsed:.1} ms（{:.0} μs/次）",
+        elapsed * 1e3 / 1_000.0
+    );
+
     // 7. 更新 1 万行（索引全量重建）
     let start = Instant::now();
     for i in 0..10_000 {

@@ -13,7 +13,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use dhrust::json::write_quoted;
+use dhrust::json::{format_number, write_quoted};
 
 use crate::model::{CacheObject, Field};
 use crate::value::{FieldKind, FieldValue};
@@ -194,7 +194,14 @@ fn write_value(out: &mut String, value: &FieldValue) {
         FieldValue::Null => out.push_str("null"),
         FieldValue::Bool(flag) => out.push_str(if *flag { "true" } else { "false" }),
         FieldValue::Int(number) => out.push_str(&number.to_string()),
-        FieldValue::Float(number) => out.push_str(&FieldValue::Float(*number).to_json_text()),
+        FieldValue::Float(number) => {
+            let text = format_number(*number);
+            if number.is_finite() {
+                out.push_str(&text);
+            } else {
+                write_quoted(out, &text);
+            }
+        }
         FieldValue::Text(text) => write_quoted(out, text),
         FieldValue::Time(time) => {
             write_quoted(out, &time.format("%Y-%m-%d %H:%M:%S").to_string())

@@ -23,7 +23,7 @@ use crate::json;
 use crate::model::{
     CacheObject, CompositeUniqueRule, Field, PagedResult, TableStatistics,
 };
-use crate::persistence::write_atomic;
+use dhrust::io::write_all_text_atomic;
 use crate::unique::{UniqueSet, ValueGetter};
 use crate::value::{FieldKind, FieldValue};
 
@@ -65,10 +65,8 @@ struct State {
 impl Table {
     /// 按实体类型创建空表。
     pub(crate) fn new<T: CacheObject>() -> Self {
-        let mut indexes = IndexSet::new();
-        // C# 版会为所有属性（含 Id/Name）建索引；这里固定预置 Id/Name，业务字段按声明。
-        indexes.ensure("Id", FieldKind::Int);
-        indexes.ensure("Name", FieldKind::Text);
+        // 预建全部字段的索引槽（Id/Name + 声明为 indexed 的字段），热路径不再做 entry 查找
+        let indexes = IndexSet::new_with_fields(T::fields());
 
         Self {
             type_name: T::type_name(),
@@ -109,10 +107,14 @@ impl Table {
     }
 
     /// 标记脏数据（后台持久化线程据此写盘）。
-    pub(crate) fn mark_dirty(&self) {
-        if !self.not_save {
-            self.dirty.store(true, Ordering::Release);
+    ///
+    /// 返回 `true` 表示本次从“干净”变为“脏”（调用方据此决定是否唤醒后台线程，
+    /// 连续写入时只在第一次唤醒，减少调度锁竞争）。
+    pub(crate) fn mark_dirty(&self) -> bool {
+        if self.not_save {
+            return false;
         }
+        !self.dirty.swap(true, Ordering::AcqRel)
     }
 
     /// 从磁盘加载（首次访问时调用一次；文件不存在视为空表）。
@@ -207,7 +209,7 @@ impl Table {
         self.dirty.store(false, Ordering::Release);
         let start = Instant::now();
         let text = self.snapshot_text(pretty);
-        match write_atomic(path, text.as_bytes()) {
+        match write_all_text_atomic(path, &text) {
             Ok(()) => {
                 let bytes = text.len() as u64;
                 self.persist_count.fetch_add(1, Ordering::Relaxed);
@@ -262,42 +264,77 @@ impl Table {
     }
 
     /// 更新实体（按 `obj.id()` 匹配；不存在或类型不符返回错误）。
+    ///
+    /// **按字段 diff**：只重建真正变化的普通索引/唯一键（典型“改 1 个字段”的更新
+    /// 不再全量删除 + 重建全部索引）。
     pub(crate) fn update<T: CacheObject>(&self, obj: T) -> Result<()> {
         let mut state = self.write();
         let id = obj.id();
-        let old = state.by_id.get(&id).cloned().ok_or_else(|| {
-            RmdbError::NotFound(format!("{}（ID {id}）", self.type_name))
-        })?;
+        let old = state
+            .by_id
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| RmdbError::NotFound(format!("{}（ID {id}）", self.type_name)))?;
         let old_ref = old.downcast_ref::<T>().ok_or(RmdbError::TypeMismatch {
             expected: self.type_name,
             got: "其他实体类型",
         })?;
 
+        // 1. 全量校验（排除自身）；失败不改变任何状态
         {
             let get = |field: &str| obj.get_field(field);
-            state.unique.validate(self.fields, self.composites, &get, Some(id))?;
+            state
+                .unique
+                .validate(self.fields, self.composites, &get, Some(id))?;
         }
 
-        // 删除旧对象的索引（普通 + 唯一）
+        // 2. 唯一索引按字段/复合键 diff（内部两阶段，失败不改变状态）
         {
-            let get = |field: &str| old_ref.get_field(field);
-            remove_index_entity(&mut state, self.fields, id, old_ref.name(), &get);
-            state.unique.remove(self.fields, self.composites, &get);
+            let old_get = |field: &str| old_ref.get_field(field);
+            let new_get = |field: &str| obj.get_field(field);
+            state
+                .unique
+                .update_entity(self.fields, self.composites, id, &old_get, &new_get)?;
         }
 
-        // 建立新对象索引；失败时恢复旧索引，保持内存与索引一致
-        let name = obj.name().to_string();
-        {
-            let get = |field: &str| obj.get_field(field);
-            index_entity(&mut state, self.fields, id, &name, &get, None);
-            if let Err(e) = state.unique.add(self.fields, self.composites, id, &get) {
-                remove_index_entity(&mut state, self.fields, id, &name, &get);
-                let old_get = |field: &str| old_ref.get_field(field);
-                index_entity(&mut state, self.fields, id, old_ref.name(), &old_get, None);
-                let _ = state.unique.add(self.fields, self.composites, id, &old_get);
-                return Err(e);
+        // 3. 普通索引按字段 diff（Name 单独处理）
+        let old_name = old_ref.name();
+        let new_name = obj.name();
+        if old_name != new_name {
+            state
+                .indexes
+                .remove("Name", &FieldValue::Text(old_name.to_string()), id);
+            state.indexes.add(
+                "Name",
+                FieldKind::Text,
+                FieldValue::Text(new_name.to_string()),
+                id,
+            );
+        }
+        for field in self.fields {
+            if !field.indexed {
+                continue;
+            }
+            if field.name == "Id" || field.name == "Name" {
+                continue;
+            }
+            let old_key = old_ref
+                .get_field(field.name)
+                .and_then(|value| value.normalize(field.kind));
+            let new_key = obj
+                .get_field(field.name)
+                .and_then(|value| value.normalize(field.kind));
+            if old_key == new_key {
+                continue;
+            }
+            if let Some(key) = old_key {
+                state.indexes.remove(field.name, &key, id);
+            }
+            if let Some(key) = new_key {
+                state.indexes.add(field.name, field.kind, key, id);
             }
         }
+
         state.by_id.insert(id, Arc::new(obj));
         Ok(())
     }
@@ -324,9 +361,7 @@ impl Table {
     pub(crate) fn clear(&self) {
         let mut state = self.write();
         state.by_id.clear();
-        state.indexes.clear();
-        state.indexes.ensure("Id", FieldKind::Int);
-        state.indexes.ensure("Name", FieldKind::Text);
+        state.indexes = IndexSet::new_with_fields(self.fields);
         state.unique.clear();
         state.next_id = 1;
         state.loaded = true;
@@ -403,8 +438,11 @@ impl Table {
             return Vec::new();
         }
         let state = self.read();
+        // 先查候选集最小的条件（减少交集规模）
+        let mut ordered: Vec<&(&str, FieldValue)> = conditions.iter().collect();
+        ordered.sort_by_key(|(field, _)| state.indexes.id_count(field));
         let mut result: Option<HashSet<i64>> = None;
-        for (field, value) in conditions {
+        for (field, value) in ordered {
             let Some(kind) = self.field_kind(field) else {
                 return Vec::new();
             };
@@ -511,34 +549,56 @@ impl Table {
         }
 
         if !used_index {
-            let mut rows: Vec<(FieldValue, i64)> = state
-                .by_id
-                .iter()
-                .map(|(id, item)| {
-                    let key = sort_field
-                        .and_then(|field| {
-                            let kind = self.field_kind(field)?;
-                            let value = item.downcast_ref::<T>()?.get_field(field)?;
-                            value.normalize(kind)
-                        })
-                        .unwrap_or(FieldValue::Null);
-                    (key, *id)
-                })
-                .collect();
-            rows.sort_by(|a, b| {
-                let ordering = if ascending {
-                    a.0.cmp(&b.0)
-                } else {
-                    b.0.cmp(&a.0)
-                };
-                ordering.then(a.1.cmp(&b.1))
-            });
-            items = rows
-                .into_iter()
-                .skip(skip)
-                .take(page_size)
-                .filter_map(|(_, id)| state.by_id.get(&id)?.clone().downcast::<T>().ok())
-                .collect();
+            match sort_field {
+                None => {
+                    // 无排序字段：按 ID 升序/降序取页（整数排序，不做 FieldValue 比较）
+                    let mut ids: Vec<i64> = state.by_id.keys().copied().collect();
+                    ids.sort_unstable();
+                    if !ascending {
+                        ids.reverse();
+                    }
+                    items = ids
+                        .into_iter()
+                        .skip(skip)
+                        .take(page_size)
+                        .filter_map(|id| state.by_id.get(&id)?.clone().downcast::<T>().ok())
+                        .collect();
+                }
+                Some(field) => {
+                    let kind = self.field_kind(field);
+                    let mut rows: Vec<(FieldValue, i64)> = Vec::with_capacity(total_count);
+                    for (id, item) in &state.by_id {
+                        let key = kind
+                            .and_then(|kind| {
+                                item.downcast_ref::<T>()?
+                                    .get_field(field)
+                                    .and_then(|value| value.normalize(kind))
+                            })
+                            .unwrap_or(FieldValue::Null);
+                        rows.push((key, *id));
+                    }
+                    let cmp = |a: &(FieldValue, i64), b: &(FieldValue, i64)| {
+                        let ordering = if ascending {
+                            a.0.cmp(&b.0)
+                        } else {
+                            b.0.cmp(&a.0)
+                        };
+                        ordering.then(a.1.cmp(&b.1))
+                    };
+                    // 只选目标页边界（O(n)），再排序前 take_end 个（O(k log k)）
+                    if take_end < rows.len() {
+                        rows.select_nth_unstable_by(take_end - 1, cmp);
+                        rows.truncate(take_end);
+                    }
+                    rows.sort_by(cmp);
+                    items = rows
+                        .into_iter()
+                        .skip(skip)
+                        .take(page_size)
+                        .filter_map(|(_, id)| state.by_id.get(&id)?.clone().downcast::<T>().ok())
+                        .collect();
+                }
+            }
         }
 
         PagedResult {
@@ -578,9 +638,15 @@ impl Table {
 }
 
 fn collect_by_ids<T: CacheObject>(state: &State, ids: Vec<i64>) -> Vec<Arc<T>> {
-    ids.into_iter()
-        .filter_map(|id| state.by_id.get(&id)?.clone().downcast::<T>().ok())
-        .collect()
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(item) = state.by_id.get(&id)
+            && let Ok(item) = item.clone().downcast::<T>()
+        {
+            out.push(item);
+        }
+    }
+    out
 }
 
 /// 建立普通索引（`only = None` 表示全部；`Some` 时仅指定字段，对应 C# `InsertByIndex`）。
@@ -614,7 +680,7 @@ fn index_entity(
         if !field.indexed || !wanted(field.name) {
             continue;
         }
-        if field.name.eq_ignore_ascii_case("Id") || field.name.eq_ignore_ascii_case("Name") {
+        if field.name == "Id" || field.name == "Name" {
             continue;
         }
         if let Some(value) = get(field.name)
@@ -640,7 +706,7 @@ fn remove_index_entity(
         if !field.indexed {
             continue;
         }
-        if field.name.eq_ignore_ascii_case("Id") || field.name.eq_ignore_ascii_case("Name") {
+        if field.name == "Id" || field.name == "Name" {
             continue;
         }
         if let Some(value) = get(field.name)

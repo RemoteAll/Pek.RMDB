@@ -65,7 +65,7 @@
 | 解析 | 自带 `JsonParser`（注释/裸键） | 复用 `dhrust::json::parse_lax`（注释/裸键/引号键/尾逗号/Unicode；C# 兼容下沉实现） |
 | 写入 | `Task.Run` 异步 + 500ms 跳过 | 后台线程 + 500ms 合并（**不丢尾写**）+ 原子替换 |
 | 转义 | `JsonString.ClearNewLine`（`\`/`"`、去换行/Tab） | 相同（`Name` 也转义，C# 特殊路径未转义） |
-| 时间 | `DateTime.ToString()`（随文化，如 `2024/1/5 14:30:00`） | 写 `yyyy-MM-dd HH:mm:ss`；读兼容斜杠/ISO/Unix 时间戳 |
+| 时间 | `DateTime.ToString()`（随文化，如 `2024/1/5 14:30:00`） | 写 `yyyy-MM-dd HH:mm:ss`；读复用 `dhrust::times::parse_datetime_lax`（斜杠/ISO/Unix 秒毫秒） |
 | 加载 | 首次 `FindAll/FindBy` 时按需加载 | 首次访问该表时加载（含 `FindById`） |
 
 > Rust 写出的文件可被 C# 版直接读取；C# 写出的旧文件可直接放入 `Data/` 由 Rust 加载（测试 `reads_csharp_legacy_file` 覆盖）。
@@ -77,11 +77,12 @@
 | 实体描述 | 反射属性 | `fields()` + `get_field/set_field` | Rust 无反射；静态描述零运行时开销 |
 | 读返回值 | 对象引用（可变） | `Arc<T>`（不可变共享） | 并发安全；更新需提交完整对象 |
 | 更新 | 修改同一实例后 `Update()` | `let mut x = (*find_by_id(id)?).clone(); ...; update(x)` | Rust 没有共享可变引用 |
+| 更新索引 | 删除全部旧索引 + 重建全部索引 | **按字段 diff**，只改动变化的普通索引与唯一键 | 性能（典型改 1 字段：11.2→3.2 µs/行） |
 | 删除 | `Delete(obj)` | `delete::<T>(id)` | ID 唯一标识，避免类型擦除 |
 | 排序分页 | 反射 `GetValue` + `OrderBy` 全量排序 | 优先按索引顺序取页；索引不全才全量排序 | 性能（9µs/页） |
 | 分页无排序字段 | 字典遍历顺序 | 按 ID 升序 | 结果稳定可复现 |
 | `[NotIndexed]` | 索引系统未使用该特性（所有属性都建索引） | `not_indexed()` 真正跳过索引 | 尊重声明、节省内存 |
-| 通配符 | `"ab"` 可匹配 `"abc"`（未消耗完文本） | 必须完整匹配 | 修正缺陷 |
+| 通配符 | `"ab"` 可匹配 `"abc"`（未消耗完文本） | 必须完整匹配；`*` 与 `?`（复用 `dhrust::io::wildcard_match`） | 修正缺陷 + 复用公共实现 |
 | 加载唯一冲突 | 记警告，对象仍入表但唯一索引缺失 | 跳过该对象（含普通索引） | 保持主存储与索引一致 |
 | ID 计数器 | 加载后不修正，新增从 1 覆盖旧数据 | 加载后取 `max(id)+1` | 修正数据损坏缺陷 |
 | `clear` | 清空后下次 `FindAll` 重新从文件加载 | 清空并写空表 | 语义更直观（“清空”即持久清空） |

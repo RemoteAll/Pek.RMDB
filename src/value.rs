@@ -12,7 +12,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use chrono::{NaiveDate, NaiveDateTime};
-use dhrust::json::write_quoted;
+use dhrust::json::{format_number, write_quoted};
 
 /// 字段值类型（内存数据库中的“万能值”）。
 #[derive(Clone, Debug)]
@@ -90,11 +90,7 @@ impl FieldValue {
             FieldValue::Bool(v) => Some(*v),
             FieldValue::Int(v) => Some(*v != 0),
             FieldValue::Float(v) => Some(*v != 0.0),
-            FieldValue::Text(s) => match s.trim().to_ascii_lowercase().as_str() {
-                "true" | "1" | "yes" | "on" | "是" => Some(true),
-                "false" | "0" | "no" | "off" | "否" => Some(false),
-                _ => None,
-            },
+            FieldValue::Text(s) => dhrust::text::parse_bool(s),
             _ => None,
         }
     }
@@ -104,9 +100,11 @@ impl FieldValue {
     pub fn to_time(&self) -> Option<NaiveDateTime> {
         match self {
             FieldValue::Time(t) => Some(*t),
-            FieldValue::Text(s) => parse_time_text(s),
-            FieldValue::Int(v) => time_from_timestamp(*v),
-            FieldValue::Float(v) if v.is_finite() => time_from_timestamp(*v as i64),
+            FieldValue::Text(s) => dhrust::times::parse_datetime_lax(s),
+            FieldValue::Int(v) => dhrust::times::from_unix_timestamp(*v),
+            FieldValue::Float(v) if v.is_finite() => {
+                dhrust::times::from_unix_timestamp(*v as i64)
+            }
             _ => None,
         }
     }
@@ -147,14 +145,11 @@ impl FieldValue {
             FieldValue::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
             FieldValue::Int(v) => out.push_str(&v.to_string()),
             FieldValue::Float(v) => {
+                let text = format_number(*v);
                 if v.is_finite() {
-                    out.push_str(&format_float(*v));
-                } else if v.is_nan() {
-                    out.push_str("\"NaN\"");
-                } else if *v > 0.0 {
-                    out.push_str("\"Infinity\"");
+                    out.push_str(&text);
                 } else {
-                    out.push_str("\"-Infinity\"");
+                    write_quoted(out, &text);
                 }
             }
             FieldValue::Text(s) => write_quoted(out, s),
@@ -183,63 +178,6 @@ impl FieldValue {
             }
         }
     }
-}
-
-/// 浮点文本：整数值输出 `1`（与 C# `double.ToString()` 对齐），其余用最短往返表示。
-fn format_float(v: f64) -> String {
-    if v == v.trunc() && v.abs() < 1e15 {
-        format!("{}", v as i64)
-    } else {
-        format!("{v}")
-    }
-}
-
-/// 时间文本解析（先走 `dhrust::times::parse_datetime`，再补 C# `Convert.ToDateTime` 常见格式）。
-pub(crate) fn parse_time_text(text: &str) -> Option<NaiveDateTime> {
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    if let Some(v) = dhrust::times::parse_datetime(text) {
-        return Some(v);
-    }
-    const DATETIME_FORMATS: [&str; 5] = [
-        "%Y/%m/%d %H:%M:%S",
-        "%Y/%m/%d %H:%M",
-        "%Y/%m/%d %H:%M:%S%.f",
-        "%Y-%m-%d %H:%M:%S%.3f",
-        "%Y-%m-%d %H:%M:%S%.f",
-    ];
-    for fmt in DATETIME_FORMATS {
-        if let Ok(v) = NaiveDateTime::parse_from_str(text, fmt) {
-            return Some(v);
-        }
-    }
-    const DATE_FORMATS: [&str; 2] = ["%Y/%m/%d", "%Y-%m-%d"];
-    for fmt in DATE_FORMATS {
-        if let Ok(d) = NaiveDate::parse_from_str(text, fmt) {
-            return d.and_hms_opt(0, 0, 0);
-        }
-    }
-    // 数字时间戳（秒 / 毫秒）文本形式
-    text.parse::<i64>().ok().and_then(time_from_timestamp)
-}
-
-/// Unix 时间戳 → 本地时间（≥ 1e11 视为毫秒；与 C# `DateTime` 本地语义一致）。
-pub(crate) fn time_from_timestamp(value: i64) -> Option<NaiveDateTime> {
-    let (secs, nanos) = if value.abs() >= 100_000_000_000 {
-        (value.div_euclid(1000), value.rem_euclid(1000) as u32 * 1_000_000)
-    } else {
-        (value, 0)
-    };
-    chrono::DateTime::from_timestamp(secs, nanos).map(|utc| {
-        use chrono::TimeZone;
-        chrono::Local
-            .timestamp_opt(utc.timestamp(), utc.timestamp_subsec_nanos())
-            .single()
-            .map(|local| local.naive_local())
-            .unwrap_or_else(|| utc.naive_utc())
-    })
 }
 
 impl PartialEq for FieldValue {
@@ -594,12 +532,19 @@ mod tests {
             .unwrap()
             .and_hms_opt(14, 30, 0)
             .unwrap();
-        assert_eq!(parse_time_text("2024-01-05 14:30:00"), Some(expect));
-        assert_eq!(parse_time_text("2024-01-05T14:30:00"), Some(expect));
-        assert_eq!(parse_time_text("2024/1/5 14:30:00"), Some(expect));
+        let parse = |text: &str| FieldValue::Text(text.to_string()).to_time();
+        assert_eq!(parse("2024-01-05 14:30:00"), Some(expect));
+        assert_eq!(parse("2024-01-05T14:30:00"), Some(expect));
+        assert_eq!(parse("2024/1/5 14:30:00"), Some(expect));
         assert_eq!(
-            parse_time_text("2024-01-05"),
+            parse("2024-01-05"),
             Some(NaiveDate::from_ymd_opt(2024, 1, 5).unwrap().and_hms_opt(0, 0, 0).unwrap())
+        );
+        // 数字时间戳同样可识别（与共享解析器同一口径）
+        let secs = expect.and_utc().timestamp();
+        assert_eq!(
+            FieldValue::Int(secs).to_time(),
+            dhrust::times::from_unix_timestamp(secs)
         );
     }
 

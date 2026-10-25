@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::model::IndexStatistics;
+use crate::model::{Field, IndexStatistics};
 use crate::value::{FieldKind, FieldValue, TimePattern};
 
 /// 单个字段的索引槽。
@@ -395,45 +395,14 @@ fn text_pattern(index: &TextIndex, pattern: &str) -> Vec<i64> {
             }
         }
     } else {
-        // 复杂通配（如 a*b*c）：遍历 + 逐字符匹配
+        // 复杂通配（如 a*b*c）：遍历 + 逐字符匹配（复用 dhrust::io，支持 * 与 ?）
         for (key, ids) in &index.lower {
-            if wildcard_match(key, &lower_pattern) {
+            if dhrust::io::wildcard_match(&lower_pattern, key) {
                 out.extend(ids.iter().copied());
             }
         }
     }
     out
-}
-
-/// 简单通配符匹配（支持 `*`；比 C# 版修正了“模式短于文本也判真”的缺陷）。
-pub(crate) fn wildcard_match(text: &str, pattern: &str) -> bool {
-    let text: Vec<char> = text.chars().collect();
-    let pattern: Vec<char> = pattern.chars().collect();
-    let mut ti = 0usize;
-    let mut pi = 0usize;
-    let mut star: Option<usize> = None;
-    let mut mark = 0usize;
-
-    while ti < text.len() {
-        if pi < pattern.len() && pattern[pi] == text[ti] {
-            ti += 1;
-            pi += 1;
-        } else if pi < pattern.len() && pattern[pi] == '*' {
-            star = Some(pi);
-            pi += 1;
-            mark = ti;
-        } else if let Some(star_pos) = star {
-            pi = star_pos + 1;
-            mark += 1;
-            ti = mark;
-        } else {
-            return false;
-        }
-    }
-    while pi < pattern.len() && pattern[pi] == '*' {
-        pi += 1;
-    }
-    pi == pattern.len()
 }
 
 /// 字段索引集合。
@@ -449,6 +418,23 @@ impl IndexSet {
         }
     }
 
+    /// 按实体字段声明一次性建好索引槽（热路径不再做 `entry` 查找/插入）。
+    pub(crate) fn new_with_fields(fields: &'static [Field]) -> Self {
+        let mut set = Self::new();
+        set.ensure("Id", FieldKind::Int);
+        set.ensure("Name", FieldKind::Text);
+        for field in fields {
+            if !field.indexed {
+                continue;
+            }
+            if field.name.eq_ignore_ascii_case("Id") || field.name.eq_ignore_ascii_case("Name") {
+                continue;
+            }
+            set.ensure(field.name, field.kind);
+        }
+        set
+    }
+
     pub(crate) fn ensure(&mut self, field: &'static str, kind: FieldKind) {
         self.slots
             .entry(field)
@@ -456,10 +442,14 @@ impl IndexSet {
     }
 
     pub(crate) fn add(&mut self, field: &'static str, kind: FieldKind, key: FieldValue, id: i64) {
-        self.ensure(field, kind);
         if let Some(slot) = self.slots.get_mut(field) {
             slot.add(key, id);
+            return;
         }
+        // 兜底：动态字段（如 `insert_by_index` 未预建的字段）
+        let mut slot = IndexSlot::new(field, kind);
+        slot.add(key, id);
+        self.slots.insert(field, slot);
     }
 
     pub(crate) fn remove(&mut self, field: &str, key: &FieldValue, id: i64) {
@@ -500,10 +490,6 @@ impl IndexSet {
             .and_then(|slot| slot.index.take_ordered(ascending, limit))
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.slots.clear();
-    }
-
     pub(crate) fn statistics(&self) -> Vec<IndexStatistics> {
         let mut stats: Vec<_> = self
             .slots
@@ -520,14 +506,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wildcard_matches_csharp_cases() {
-        assert!(wildcard_match("zhangsan", "zhang*"));
-        assert!(wildcard_match("zhangsan", "*san"));
-        assert!(wildcard_match("zhangsan", "*hang*"));
-        assert!(wildcard_match("zhangsan", "z*n"));
-        assert!(wildcard_match("abc", "*"));
-        assert!(!wildcard_match("abc", "ab"));
-        assert!(!wildcard_match("abc", "b*"));
+    fn wildcard_comes_from_shared_io_module() {
+        assert!(dhrust::io::wildcard_match("zhang*", "zhangsan"));
+        assert!(dhrust::io::wildcard_match("*hang*", "zhangsan"));
+        assert!(dhrust::io::wildcard_match("z*n", "zhangsan"));
+        assert!(dhrust::io::wildcard_match("*", "abc"));
+        assert!(dhrust::io::wildcard_match("a?c", "abc"));
+        assert!(!dhrust::io::wildcard_match("ab", "abc"));
+        assert!(!dhrust::io::wildcard_match("b*", "abc"));
     }
 
     #[test]

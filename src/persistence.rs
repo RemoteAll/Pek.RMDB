@@ -1,47 +1,13 @@
-//! 持久化支撑：原子写文件 + 后台写盘调度原语。
+//! 持久化调度原语：**变化驱动 + 写合并**。
 //!
 //! 设计目标（对齐用户“资源与带宽”偏好）：
 //! - **变化驱动**：只有标记为脏的表才会被写盘，空闲时后台线程在条件变量上无限等待（零轮询）；
 //! - **写合并**：500ms 最小间隔内的多次修改合并为一次序列化 + 一次写盘；
-//! - **原子替换**：先写同目录临时文件再替换（`dhrust::io::safe_replace_file`），避免半截文件；
+//! - **原子替换**：原子写复用 `dhrust::io::write_all_text_atomic`（临时文件 + 替换）；
 //! - **不丢尾写**：写盘开始时“取走”脏标记，写入期间的新修改会重新置脏并在下一轮补写。
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
-
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// 原子写文件（同目录临时文件 + 替换）。
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let dir = path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    std::fs::create_dir_all(&dir)?;
-
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "data.json".to_string());
-    let temp = dir.join(format!(".{file_name}.{}-{seq}.tmp", std::process::id()));
-
-    {
-        let mut file = std::fs::File::create(&temp)?;
-        file.write_all(bytes)?;
-        file.flush()?;
-    }
-    match dhrust::io::safe_replace_file(&temp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&temp);
-            Err(e)
-        }
-    }
-}
 
 /// 后台写盘调度原语（条件变量 + 最小写入间隔）。
 pub(crate) struct PersistHub {
@@ -88,10 +54,7 @@ impl PersistHub {
     pub(crate) fn wait(&self) {
         let mut state = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
         while !state.pending && !state.stop {
-            state = self
-                .cv
-                .wait(state)
-                .unwrap_or_else(|e| e.into_inner());
+            state = self.cv.wait(state).unwrap_or_else(|e| e.into_inner());
         }
     }
 
@@ -133,21 +96,6 @@ impl PersistHub {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn atomic_write_replaces_existing_content() {
-        let dir = std::env::temp_dir().join(format!(
-            "pek-rmdb-atomic-{}-{}",
-            std::process::id(),
-            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("a.json");
-        write_atomic(&path, b"first").unwrap();
-        write_atomic(&path, b"second").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn hub_notify_and_stop_are_idempotent() {

@@ -8,7 +8,7 @@
 | 能力 | 说明 |
 |---|---|
 | 类型化实体 | `CacheObject` trait + `const fn` 字段描述，**无反射、无装箱** |
-| 类型感知索引 | 文本（精确 + 大小写不敏感模糊）、整数/浮点/时间（`BTreeMap` 有序范围）、布尔（双桶 + 智能值）、JSON（文本键） |
+| 类型感知索引 | 文本（精确 + 大小写不敏感模糊 `*`/`?`）、整数/浮点/时间（`BTreeMap` 有序范围）、布尔（双桶 + 智能值）、JSON（文本键） |
 | 唯一约束 | 单字段 `[Unique]` 与复合 `[CompositeUnique]`，支持 `allow_null`、更新排除自身、批量校验 |
 | 查询 | 按 ID / 字段 / 范围 / 通配符 / 多条件交集 / 唯一值 / 复合键 / 分页 |
 | 异步持久化 | 后台线程合并写盘（默认 500ms 窗口）、原子替换、`flush()` 同步落盘 |
@@ -107,7 +107,7 @@ static EMPLOYEE_RULES: &[CompositeUniqueRule] = &[CompositeUniqueRule::new(
 
 | 构造器 | 类型 | 索引能力 |
 |---|---|---|
-| `Field::text(name)` | 文本 | 精确（区分大小写）、`find_by_like`（大小写不敏感：`*` 通配/前缀/包含/后缀）、范围（小写字典序） |
+| `Field::text(name)` | 文本 | 精确（区分大小写）、`find_by_like`（大小写不敏感：`*`/`?` 通配、前缀、包含、后缀）、范围（小写字典序） |
 | `Field::int(name)` / `Field::float(name)` | 数值 | 精确、范围 `O(log n + k)` |
 | `Field::bool(name)` | 布尔 | 精确、智能模式（`true/1/yes/on/是`、`false/0/no/off/否`） |
 | `Field::time(name)` | 时间 | 精确、范围、年/年月/年月日（`find_by_like("2024-01")`） |
@@ -143,12 +143,14 @@ static EMPLOYEE_RULES: &[CompositeUniqueRule] = &[CompositeUniqueRule::new(
 
 | 操作 | 实测 | 备注 |
 |---|---|---|
-| 插入 10 万行（10 索引 + 3 唯一） | **6.9 µs/行**（14.4 万行/秒） | 批量插入摊销 |
-| `find_by_id` | **133 ns/次** | 读锁 + 哈希查 + `Arc` 克隆 |
-| `find_by_unique` | **429 ns/次** | 含查询字符串构造 |
-| `update` | **11.2 µs/行** | 含读取/克隆/索引重建 |
-| `find_by_page`（索引顺序） | **9 µs/次** | 不排序，按页取 |
-| 并发 `find_by_id` 8 线程 | **767 万次/秒** | 读读并发无阻塞 |
+| 插入 10 万行（11 索引 + 3 唯一） | **6.8~6.9 µs/行**（14.5 万行/秒） | 批量插入摊销 |
+| `find_by_id` | **120~142 ns/次** | 读锁 + 哈希查 + `Arc` 克隆 |
+| `find_by_unique` | **429~436 ns/次** | 含查询字符串构造 |
+| `update` | **3.05~3.23 µs/行** | 按字段 diff，只重建变化索引 |
+| `find_by_page`（索引顺序） | **8~9 µs/次** | 不排序，按页取 |
+| `find_by_page`（无索引字段/无排序） | 19.8 ms / 1.35 ms（10 万行） | 全量键 + 部分选择 |
+| 并发 `find_by_id` 8 线程 | **668~740 万次/秒** | 读读并发无阻塞 |
+| 全量写盘（10 万行） | 126~128 ms / 20.3 MB | 500ms 合并、原子替换 |
 
 C# 版 README 基准（FindById ≈1 µs、Insert ≈10 µs、唯一查找 ≈1 µs）：Rust 版在同等/更多索引下分别约为 **7.5× / 1.4× / 2.3×** 更快。
 
@@ -163,10 +165,13 @@ cargo test --release --test perf_guard -- --ignored --nocapture --test-threads=1
 
 依赖下载走项目内 `.cargo/config.toml`（rsproxy 镜像）；日常构建可用 `cargo build --profile fast`。
 
+公共能力（不重复实现）：`dhrust::json`（宽松解析/转义/数字格式化）、`dhrust::text::parse_bool`、`dhrust::times`（时间解析）、`dhrust::io`（原子写/通配匹配/安全文件名）。
+
 ## 设计文档
 
 - `docs/与C#对照.md`：API/特性映射、有意差异与 C# 缺陷修正清单；
-- `docs/审计报告.md`：性能与资源审计、实测数据、待办；
+- `docs/审计报告.md`：首轮性能与资源审计；
+- `docs/审计报告-第二轮-下沉与性能-2026-10-25.md`：下沉候选矩阵、update diff 优化（3.5×）与全量审计；
 - `docs/决策记录.md`：每轮决策（含用户原话）；
 - `docs/项目接续指南.md` / `docs/用户档案.md` / `docs/项目记忆.md`：跨会话接续。
 

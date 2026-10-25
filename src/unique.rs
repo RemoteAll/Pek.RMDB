@@ -17,6 +17,16 @@ use crate::value::FieldValue;
 /// 取值器：按字段名读取当前对象的值。
 pub(crate) type ValueGetter<'a> = &'a dyn Fn(&str) -> Option<FieldValue>;
 
+/// 单字段唯一键变更：`(字段名, 旧键, 新键)`。
+type FieldChange = (&'static str, Option<FieldValue>, Option<FieldValue>);
+
+/// 复合唯一键变更：`(约束组名, 旧键, 新键)`。
+type CompositeChange = (
+    &'static str,
+    Option<Vec<FieldValue>>,
+    Option<Vec<FieldValue>>,
+);
+
 /// 唯一约束索引。
 #[derive(Default)]
 pub(crate) struct UniqueSet {
@@ -114,7 +124,7 @@ impl UniqueSet {
         obj_id: i64,
         get: ValueGetter<'_>,
     ) -> Result<()> {
-        let mut pending_fields: Vec<(&'static str, FieldValue)> = Vec::new();
+        let mut pending_fields: Vec<(&'static str, FieldValue)> = Vec::with_capacity(fields.len());
         for field in fields {
             let Some(rule) = field.unique else {
                 continue;
@@ -151,7 +161,8 @@ impl UniqueSet {
             pending_fields.push((field.name, key));
         }
 
-        let mut pending_composites: Vec<(&'static str, Vec<FieldValue>)> = Vec::new();
+        let mut pending_composites: Vec<(&'static str, Vec<FieldValue>)> =
+            Vec::with_capacity(composites.len());
         for rule in composites {
             let (key, has_null) = composite_key(fields, rule, get)?;
             if has_null {
@@ -188,6 +199,108 @@ impl UniqueSet {
         }
         for (group, key) in pending_composites {
             self.composites.entry(group).or_default().insert(key, obj_id);
+        }
+        Ok(())
+    }
+
+    /// 更新对象的唯一约束索引（按字段/复合键 diff；两阶段：先校验全部变更，再统一应用）。
+    ///
+    /// 只改动真正变化的唯一键（典型更新只改 1~2 个字段时，避免全量重建）。
+    pub(crate) fn update_entity(
+        &mut self,
+        fields: &'static [Field],
+        composites: &'static [CompositeUniqueRule],
+        obj_id: i64,
+        old: ValueGetter<'_>,
+        new: ValueGetter<'_>,
+    ) -> Result<()> {
+        let mut field_changes: Vec<FieldChange> = Vec::with_capacity(fields.len());
+        for field in fields {
+            let Some(rule) = field.unique else {
+                continue;
+            };
+            let old_key = old(field.name)
+                .unwrap_or(FieldValue::Null)
+                .normalize(field.kind);
+            let new_key = new(field.name)
+                .unwrap_or(FieldValue::Null)
+                .normalize(field.kind);
+            if old_key == new_key {
+                continue;
+            }
+            if let Some(key) = &new_key
+                && let Some(existing) = self
+                    .fields
+                    .get(field.name)
+                    .and_then(|index| index.get(key))
+                && *existing != obj_id
+            {
+                return Err(RmdbError::Unique(UniqueViolation {
+                    property_name: field.name.to_string(),
+                    value: Some(key.clone()),
+                    constraint_type: ConstraintType::Single,
+                    conflicting_id: Some(*existing),
+                    message: rule.message.to_string(),
+                }));
+            }
+            field_changes.push((field.name, old_key, new_key));
+        }
+
+        let mut composite_changes: Vec<CompositeChange> = Vec::with_capacity(composites.len());
+        for rule in composites {
+            let old_key = composite_key_opt(fields, rule, old)?;
+            let new_key = composite_key_opt(fields, rule, new)?;
+            if old_key == new_key {
+                continue;
+            }
+            if let Some(key) = &new_key
+                && let Some(existing) = self
+                    .composites
+                    .get(rule.group)
+                    .and_then(|index| index.get(key))
+                && *existing != obj_id
+            {
+                return Err(RmdbError::Unique(UniqueViolation {
+                    property_name: rule.fields.join(", "),
+                    value: Some(FieldValue::List(key.clone())),
+                    constraint_type: ConstraintType::Composite,
+                    conflicting_id: Some(*existing),
+                    message: rule.message.to_string(),
+                }));
+            }
+            composite_changes.push((rule.group, old_key, new_key));
+        }
+
+        // 校验全部通过，应用变更
+        for (name, old_key, new_key) in field_changes {
+            if let Some(key) = old_key {
+                if let Some(index) = self.fields.get_mut(name) {
+                    index.remove(&key);
+                }
+                if self.fields.get(name).is_some_and(|index| index.is_empty()) {
+                    self.fields.remove(name);
+                }
+            }
+            if let Some(key) = new_key {
+                self.fields.entry(name).or_default().insert(key, obj_id);
+            }
+        }
+        for (group, old_key, new_key) in composite_changes {
+            if let Some(key) = old_key {
+                if let Some(index) = self.composites.get_mut(group) {
+                    index.remove(&key);
+                }
+                if self
+                    .composites
+                    .get(group)
+                    .is_some_and(|index| index.is_empty())
+                {
+                    self.composites.remove(group);
+                }
+            }
+            if let Some(key) = new_key {
+                self.composites.entry(group).or_default().insert(key, obj_id);
+            }
         }
         Ok(())
     }
@@ -276,6 +389,30 @@ fn composite_key(
         }
     }
     Ok((key, has_null))
+}
+
+/// 构造复合键；含空值时返回 `None`（允许空）或错误（不允许空）。
+fn composite_key_opt(
+    fields: &'static [Field],
+    rule: &CompositeUniqueRule,
+    get: ValueGetter<'_>,
+) -> Result<Option<Vec<FieldValue>>> {
+    let (key, has_null) = composite_key(fields, rule, get)?;
+    if has_null {
+        if rule.allow_null {
+            Ok(None)
+        } else {
+            Err(RmdbError::Unique(UniqueViolation {
+                property_name: rule.fields.join(", "),
+                value: Some(FieldValue::List(key)),
+                constraint_type: ConstraintType::Composite,
+                conflicting_id: None,
+                message: format!("复合约束 {} 不允许包含空值。{}", rule.group, rule.message),
+            }))
+        }
+    } else {
+        Ok(Some(key))
+    }
 }
 
 #[cfg(test)]

@@ -16,8 +16,10 @@
 
 | 能力 | 复用来源 | 说明 |
 |---|---|---|
-| 时间解析/格式化 | `dhrust::times` | C# 兼容的多格式时间解析（`parse_datetime`） |
-| JSON 宽松解析/转义 | `dhrust::json` | `JsonValue`/`parse_lax`（裸键/注释/尾逗号）、`write_quoted`（C# `ClearNewLine` 口径） |
+| 时间解析/格式化 | `dhrust::times` | C# 兼容多格式解析（`parse_datetime` / `parse_datetime_lax` / `from_unix_timestamp`） |
+| JSON 宽松解析/转义/数字 | `dhrust::json` | `JsonValue`/`parse_lax`、`write_quoted`（C# `ClearNewLine` 口径）、`format_number` |
+| 文本/布尔 | `dhrust::text` | `parse_bool`（`true/1/yes/on/是`、`false/0/no/off/否`） |
+| 原子写/通配/文件名 | `dhrust::io` | `write_all_text_atomic`、`wildcard_match`、`safe_file_name` |
 | 原子替换文件 | `dhrust::io::safe_replace_file` | 先写临时文件再替换，防半截文件 |
 | 时间类型 | `chrono` | 与 dhrust 同源 |
 | 临时目录（测试） | `tempfile`（dev-dependency） | 集成测试隔离数据目录 |

@@ -186,8 +186,9 @@ impl MemoryDb {
     pub fn insert<T: CacheObject>(&self, obj: T) -> Result<i64> {
         let table = self.table::<T>();
         let id = table.insert(obj, None)?;
-        table.mark_dirty();
-        self.inner.persist.notify();
+        if table.mark_dirty() {
+            self.inner.persist.notify();
+        }
         Ok(id)
     }
 
@@ -195,8 +196,9 @@ impl MemoryDb {
     pub fn insert_by_index<T: CacheObject>(&self, obj: T, fields: &[&str]) -> Result<i64> {
         let table = self.table::<T>();
         let id = table.insert(obj, Some(fields))?;
-        table.mark_dirty();
-        self.inner.persist.notify();
+        if table.mark_dirty() {
+            self.inner.persist.notify();
+        }
         Ok(id)
     }
 
@@ -207,8 +209,9 @@ impl MemoryDb {
         }
         let table = self.table::<T>();
         let ids = table.insert_batch(objects)?;
-        table.mark_dirty();
-        self.inner.persist.notify();
+        if table.mark_dirty() {
+            self.inner.persist.notify();
+        }
         Ok(ids)
     }
 
@@ -216,8 +219,9 @@ impl MemoryDb {
     pub fn update<T: CacheObject>(&self, obj: T) -> Result<()> {
         let table = self.table::<T>();
         table.update(obj)?;
-        table.mark_dirty();
-        self.inner.persist.notify();
+        if table.mark_dirty() {
+            self.inner.persist.notify();
+        }
         Ok(())
     }
 
@@ -225,8 +229,7 @@ impl MemoryDb {
     pub fn delete<T: CacheObject>(&self, id: i64) -> bool {
         let table = self.table::<T>();
         let deleted = table.delete::<T>(id);
-        if deleted {
-            table.mark_dirty();
+        if deleted && table.mark_dirty() {
             self.inner.persist.notify();
         }
         deleted
@@ -236,8 +239,9 @@ impl MemoryDb {
     pub fn clear<T: CacheObject>(&self) {
         let table = self.table::<T>();
         table.clear();
-        table.mark_dirty();
-        self.inner.persist.notify();
+        if table.mark_dirty() {
+            self.inner.persist.notify();
+        }
     }
 
     /// 清空全部已加载表。
@@ -246,11 +250,14 @@ impl MemoryDb {
             let tables = self.inner.tables.read().unwrap_or_else(|e| e.into_inner());
             tables.values().cloned().collect()
         };
+        let mut changed = false;
         for table in tables {
             table.clear();
-            table.mark_dirty();
+            changed |= table.mark_dirty();
         }
-        self.inner.persist.notify();
+        if changed {
+            self.inner.persist.notify();
+        }
     }
 
     /// 同步写盘所有脏表（后台线程未启用时同样可用）。
